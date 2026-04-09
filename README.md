@@ -33,45 +33,45 @@ The following **sequence diagram** sketches Push / Remove / timeout delivery und
 
 ```mermaid
 sequenceDiagram
-    actor User as Caller / timer<br/>wake-up
-    participant Push as Push path<br/>evt_loop_push_delayed
-    participant Remove as Remove path<br/>evt_loop_remove_delayed
-    participant TimerCore as Timer core<br/>soft timer + apply elapsed
-    participant EventArray as Delay table<br/>event array
-    participant Task as Work thread<br/>evt_loop task
+    actor User as Event Pusher<br/>Base Timer
+    participant Push as Push Event<br/>Core Operations
+    participant Remove as Remove Event<br/>Core Operations
+    participant TimerCore as Timer Core<br/>Timer Driver
+    participant EventArray as Event Array<br/>Event Array
+    participant Task as Business Task<br/>Target Task
 
     rect rgb(240,248,255)
-    Note over User,Task: One-shot timer mode — end-to-end flow
+    Note over User,Task: 🏷️ Timer one-shot mode — full workflow
     end
 
-    %% Path 1: push
-    User->>Push: push delayed event
-    Push->>EventArray: 1. find free slot & write entry
-    Note over Push: lost time = now - last StartTime
-    Push->>TimerCore: 2. stop timer & apply calibration
-    TimerCore->>EventArray: 3. walk table, subtract elapsed
-    TimerCore->>EventArray: 4. min delay & re-arm timer
-    Note over TimerCore: set StartTime, start one-shot
+    %% --- Path 1: Push event flow ---
+    User->>Push: Trigger push event (point A/C)
+    Push->>EventArray: 1. Find free slot & write data
+    Note over Push: Calculate Lost_Timer<br/>System tick - last StartTime
+    Push->>TimerCore: 2. Stop timer & apply calibration
+    TimerCore->>EventArray: 3. Traverse array & subtract elapsed time
+    TimerCore->>EventArray: 4. Find min delay & restart timer
+    Note over TimerCore: Set new StartTime<br/>Start one-shot timer
 
-    %% Path 2: remove
-    alt cancel / remove
-        User->>Remove: remove delayed event
-        Remove->>EventArray: 1. find & clear matching slot(s)
-        Note over Remove: lost time = now - last StartTime
-        Remove->>TimerCore: 2. stop timer & apply calibration
-        TimerCore->>EventArray: 3. walk table, subtract elapsed
-        alt table not empty
-            TimerCore->>TimerCore: 4. next minimum timeout
-            TimerCore->>TimerCore: 5. restart timer
+    %% --- Path 2: Remove event flow ---
+    alt Cancel operation (point E/F)
+        User->>Remove: Trigger remove event
+        Remove->>EventArray: 1. Find & clear target event
+        Note over Remove: Calculate Lost_Timer<br/>System tick - last StartTime
+        Remove->>TimerCore: 2. Stop timer & apply calibration
+        TimerCore->>EventArray: 3. Traverse array & subtract elapsed time
+        alt Array not empty
+            TimerCore->>TimerCore: 4. Recalculate next nearest timeout
+            TimerCore->>TimerCore: 5. Restart timer
         else
-            TimerCore->>TimerCore: 5. stop timer — no pending work
+            TimerCore->>TimerCore: 5. Stop timer<br/>No pending events
         end
     end
 
-    %% Timeout → task
-    TimerCore-->>Task: timer fires (due callbacks)
-    Note over TimerCore,Task: enqueue due jobs; run user callbacks on evt_loop
-    Task-->>User: application-visible result
+    %% --- Timer fire and task execution ---
+    TimerCore-->>Task: 🔔 Timer fire / timeout
+    Note over TimerCore,Task: Check timeout<br/>Execute expired tasks
+    Task-->>User: 📤 Final execution result
 ```
 
 ## 4. API

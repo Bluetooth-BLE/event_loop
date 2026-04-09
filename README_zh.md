@@ -178,7 +178,7 @@ EVT_LOOP_REMOVE_WITH_ARGS(my_job, (void *)1);
 
 开启 `**EVENT_LOOP_USING_SAMPLES**` 并在 FinSH/MSH 中执行 `**evt_loop_test**` 时的运行示意：
 
-evt_loop_test 示例动图
+![evt_loop_test 示例动图](./doc/test.gif)
 
 ## 8. 使用注意
 
