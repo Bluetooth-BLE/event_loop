@@ -1,16 +1,21 @@
 # Event Loop（事件循环）
 
-> 英文版：[README.md](./README.md)
+> English：[README.md](./README.md)
 
 ## 1. 简介
 
 **Event Loop** 是面向 RT-Thread 的软件包，用于在应用层调度**延迟回调**。待执行项保存在**定长延迟表**中；由**单次软定时器**推进时间；到期的任务通过**消息队列**投递，在专用线程 `**evt_loop`** 上执行（避免在软定时器线程里跑业务逻辑）。
 
-典型场景：界面/状态机延后处理、错峰重试、或在回调里再次 `EVT_LOOP_PUSH` 形成链式定时行为。
+典型场景：界面/状态机延后处理、错峰重试、或在回调里再次 `EVT_LOOP_PUSH` 形成链式定时行为。详细场景介绍：
 
-通过 `**PKG_USING_EVENT_LOOP`** 开启；元数据见 `package.json`，构建由 `Kconfig` 与 `SConscript` 接入。
+![应用场景图](./doc/Usage_scenarios.png)
+
 
 ## 2. 功能原理特性
+
+原理流程图如下：
+
+![理论图](./doc/theory.png)
 
 - **延迟投递** — `evt_loop_push_delayed()` / 宏 `**EVT_LOOP_PUSH(func, args, delay_ms)`**（`delay_ms <= 1` 时视为立即投递，走消息队列）。
 - **取消** — `**EVT_LOOP_REMOVE(func)`** 会删除延迟表中该**函数指针**下的**全部**条目；`**EVT_LOOP_REMOVE_WITH_ARGS(func, args)`** 按函数与参数匹配删除（详见头文件与实现）。
