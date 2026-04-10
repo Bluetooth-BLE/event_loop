@@ -25,7 +25,7 @@ group = DefineGroup(
     'event_loop',
     src,
     depend  = ['PKG_USING_EVENT_LOOP'],
-    CPPPATH = cpppath,
+    CPPPATH = CPPPATH,
 )
 
 Return('group')
