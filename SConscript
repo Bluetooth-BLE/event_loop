@@ -6,20 +6,20 @@
 # Date           Author     Notes
 # 2026-04-07     John       first version
 
-import os
+
 from building import *
 
 cwd     = GetCurrentDir()
-src_dir = os.path.join(cwd, 'src')
-inc_dir = os.path.join(cwd, 'inc')
 
-src = [os.path.join(src_dir, 'event_loop.c')]
+CPPPATH = [os.path.join(cwd, 'inc')]
 
-samples_dir = os.path.join(cwd, 'samples')
-cpppath = [inc_dir]
-if GetDepend('EVENT_LOOP_USING_SAMPLES'):
-    src.append(os.path.join(samples_dir, 'event_loop_test.c'))
-    cpppath.append(samples_dir)
+src = Split('''
+    src/event_loop.c
+''')
+
+if GetDepend(['EVENT_LOOP_USING_SAMPLES']):
+    src += Glob('samples/event_loop_test.c')
+    CPPPATH.append(os.path.join(cwd, 'samples'))
 
 group = DefineGroup(
     'event_loop',
