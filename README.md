@@ -1,129 +1,156 @@
-# Event Loop
+# Event Loop（事件循环）
 
-中文说明：[README_zh.md](./README_zh.md)
+> English：[README_en.md](./README_en.md)
 
-## 1. Introduction
+## 1. 简介
 
-**Event Loop** is an RT-Thread software package that schedules **delayed callbacks** in user space. Pending work is stored in a **fixed-size delay table**; a **one-shot soft timer** drives time progression; **due** jobs are sent through a **message queue** and executed on a dedicated **`evt_loop` thread** (so callbacks do not run in the timer daemon context).
+**Event Loop** 是面向 RT-Thread 的软件包，用于在应用层调度**延迟回调**。待执行项保存在**定长延迟表**中；由**单次软定时器**推进时间；到期的任务通过**消息队列**投递，在专用线程 `**evt_loop`** 上执行（避免在软定时器线程里跑业务逻辑）。
 
-Typical use: defer UI/state-machine work, staggered retries, or periodic-style chains built from `EVT_LOOP_PUSH` in the callback.
+典型场景：界面/状态机延后处理、错峰重试、或在回调里再次 `EVT_LOOP_PUSH` 形成链式定时行为。详细场景介绍：
 
-The package is enabled with **`PKG_USING_EVENT_LOOP`**. Metadata is in `package.json`; build integration uses `Kconfig` and `SConscript`.
+![应用场景图](./doc/Usage_scenarios.png)
 
-## 2. Features
+   有一个基础定时器工作于一次性定时模式，这里分4种情况对于事件的推送和取消进行分析。
 
-- **Delayed dispatch** — `evt_loop_push_delayed()` / macro **`EVT_LOOP_PUSH(func, args, delay_ms)`** (`delay_ms <= 1` is treated as immediate via the message queue).
-- **Cancel** — **`EVT_LOOP_REMOVE(func)`** removes **all** pending delayed entries for that function pointer; **`EVT_LOOP_REMOVE_WITH_ARGS(func, args)`** removes entries matching both (see header comments).
-- **Thread + MQ** — Callbacks run on the **`evt_loop`** thread; the queue depth is configurable (`EVENT_LOOP_MSGQ_DEPTH`).
-- **Single soft one-shot timer** — One `RT_TIMER_FLAG_ONE_SHOT | RT_TIMER_FLAG_SOFT_TIMER` instance; next expiry is the minimum remaining delay in the table.
-- **Concurrency** — Delay table updates are protected by a **mutex**; re-arm logic handles RT-Thread’s **`RT_TIMER_FLAG_PROCESSING`** restriction inside the soft-timer callback (`rt_timer_stop` before reprogramming, deferred `rt_timer_start` via the same message queue when required).
-- **Optional sample** — `EVENT_LOOP_USING_SAMPLES` builds `event_loop_test.c` and exports MSH command **`evt_loop_test`** (requires FinSH/MSH).
+🏷️ 情形1：事件1第一个推送事件
 
-## 3. Architecture (brief)
+    事件1在时间点A进行推送，希望在B点进行执行，当A点进行推入时，将定时器关闭，同时遍历事件维护数组，找到离当前系统tick时间差最小的事件，并设置到定时器中，这里就是设置事件1的定时时间即B点的系统tick到定时器中，然后启动定时器，如果一切顺利，中途没有异常，那么这个定时器会在B点调用回调函数，在回调函数中又必须再次遍历事件数组进行维护，一方面找到定时时间已经小于或等于0的事件去执行，另一方找到下一个定时事件。
+
+🏷️ 情形2：事件1还没有超时事件2就进行了推送
+
+    事件2在B点之前的C点进行推送，并遍历数组，找到一个空位，将刚刚推进来的相关函数指针以及延时函数等放到数组中，继而停止定时器，再次遍历数组，将所有事件的延时函数都减去(C-A)这个失去的时间，当然刚刚推进来的不用减，在这个减的过程中如果有某个事件的延时已经小于等于0，那么立刻进行执行，接着找到下一个延时最小的事件，设置定时器并启动定时器，等待下一次超时或者事件的推送和取消。
+
+🏷️ 情形3：对某个还未被执行的事件进行取消
+
+    在D点前的E点将事件1取消，那么就的将事件1和事件2的延时时间都减去(E-C)这个失去的时间，同时维护事件数组，将事件2再次设置到定期中。
+
+🏷️ 情形4：对某个还未被执行的事件进行取消
+
+    在事件1即将执行B点前的F点将事件1进行取消，在F点遍历事件数组，将事件1从数组中移除，同时关闭定时器再次对事件数组的延时进行维护，这个时候已经找不到需要执行的事件了，所以定时器也不再开启。
+
+## 2. 功能原理特性
+
+原理流程图如下：
+
+![理论图](./doc/theory.png)
+
+- **延迟投递** — `evt_loop_push_delayed()` / 宏 `**EVT_LOOP_PUSH(func, args, delay_ms)`**（`delay_ms <= 1` 时视为立即投递，走消息队列）。
+- **取消** — `**EVT_LOOP_REMOVE(func)`** 会删除延迟表中该**函数指针**下的**全部**条目；`**EVT_LOOP_REMOVE_WITH_ARGS(func, args)`** 按函数与参数匹配删除（详见头文件与实现）。
+- **独立线程 + 消息队列** — 用户回调在 `**evt_loop`** 线程执行；队列深度可配置（`EVENT_LOOP_MSGQ_DEPTH`）。
+- **单实例单次软定时器** — 使用 `RT_TIMER_FLAG_ONE_SHOT | RT_TIMER_FLAG_SOFT_TIMER`；下次到期时间为表中**最小剩余延迟**。
+- **并发安全** — 延迟表由 **mutex** 保护；重装定时器时在软定时器回调内先 `**rt_timer_stop`**，若仍因内核 `**RT_TIMER_FLAG_PROCESSING`** 无法 `rt_timer_start`，则通过**同一消息队列**延后到 `evt_loop` 线程再启动定时器。
+- **可选示例** — 开启 `**EVENT_LOOP_USING_SAMPLES`** 会编译 `event_loop_test.c`，并在开启 FinSH/MSH 时导出命令 `**evt_loop_test`**。
+
+## 3. 架构简图
 
 ```
-[ Any thread ] --push_delayed/remove--> [ delay table + mutex ]
-                                              |
-                    soft timer (one-shot) ----+--> apply elapsed --> rt_mq_send (due)
-                                              |
-                    evt_loop thread <----------+---- rt_mq_recv --> user callback (func, args)
+[ 任意线程 ] --push_delayed/remove--> [ 延迟表 + 互斥锁 ]
+                                            |
+                  单次软定时器 --------------+--> 扣减时间 --> rt_mq 发送（到期项）
+                                            |
+                  evt_loop 线程 <------------+---- rt_mq 取出 --> 用户回调 (func, args)
 ```
 
-The following **sequence diagram** sketches Push / Remove / timeout delivery under **one-shot soft-timer** mode (aligned with `event_loop.c`: delay table + soft timer + message queue). “Lost time” in the figure matches **`delay_diff` / elapsed** calibration in the implementation.
+以下为**单次软定时**模式下 Push / Remove / 超时投递的交互时序示意（与 `event_loop.c` 中延迟表 + 软定时器 + 消息队列一致；图中「流失时间」对应实现里的 `delay_diff` / `elapsed` 校准）。
 
 ```mermaid
 sequenceDiagram
-    actor User as Event Pusher<br/>Base Timer
-    participant Push as Push Event<br/>Core Operations
-    participant Remove as Remove Event<br/>Core Operations
-    participant TimerCore as Timer Core<br/>Timer Driver
-    participant EventArray as Event Array<br/>Event Array
-    participant Task as Business Task<br/>Target Task
+    actor User as 事件推送<br/>基础Timer
+    participant Push as Push 事件<br/>核心操作
+    participant Remove as Remove 事件<br/>核心操作
+    participant TimerCore as 定时器核心<br/>Timer Driver
+    participant EventArray as 事件维护数组<br/>Event Array
+    participant Task as 业务任务<br/>Target Task
 
     rect rgb(240,248,255)
-    Note over User,Task: 🏷️ Timer one-shot mode — full workflow
+    Note over User,Task: 🏷️ 定时器Timer一次性定时模式 - 完整工作流
     end
 
-    %% --- Path 1: Push event flow ---
-    User->>Push: Trigger push event (point A/C)
-    Push->>EventArray: 1. Find free slot & write data
-    Note over Push: Calculate Lost_Timer<br/>System tick - last StartTime
-    Push->>TimerCore: 2. Stop timer & apply calibration
-    TimerCore->>EventArray: 3. Traverse array & subtract elapsed time
-    TimerCore->>EventArray: 4. Find min delay & restart timer
-    Note over TimerCore: Set new StartTime<br/>Start one-shot timer
+    %% --- 路径1：Push 事件流程 ---
+    User->>Push: 触发事件推入(A/C点)
+    Push->>EventArray: 1. 查找空位 & 写入数据
+    Note over Push: 计算Lost_Timer<br/>系统tick - 上一次StartTime
+    Push->>TimerCore: 2. 暂停定时器 & 校准时间
+    TimerCore->>EventArray: 3. 遍历数组 & 减去流失时间
+    TimerCore->>EventArray: 4. 查找最小延时 & 重启Timer
+    Note over TimerCore: 设置新StartTime<br/>启动单次定时
 
-    %% --- Path 2: Remove event flow ---
-    alt Cancel operation (point E/F)
-        User->>Remove: Trigger remove event
-        Remove->>EventArray: 1. Find & clear target event
-        Note over Remove: Calculate Lost_Timer<br/>System tick - last StartTime
-        Remove->>TimerCore: 2. Stop timer & apply calibration
-        TimerCore->>EventArray: 3. Traverse array & subtract elapsed time
-        alt Array not empty
-            TimerCore->>TimerCore: 4. Recalculate next nearest timeout
-            TimerCore->>TimerCore: 5. Restart timer
+    %% --- 路径2：Remove 事件流程 ---
+    alt 触发取消操作(E/F点)
+        User->>Remove: 触发事件移除
+        Remove->>EventArray: 1. 查找并清除目标事件
+        Note over Remove: 计算Lost_Timer<br/>系统tick - 上一次StartTime
+        Remove->>TimerCore: 2. 暂停定时器 & 校准时间
+        TimerCore->>EventArray: 3. 遍历数组 & 减去流失时间
+        alt 数组非空
+            TimerCore->>TimerCore: 4. 重设下一个最近超时时间
+            TimerCore->>TimerCore: 5. 重启Timer
         else
-            TimerCore->>TimerCore: 5. Stop timer<br/>No pending events
+            TimerCore->>TimerCore: 5. 停止Timer<br/>无待执行事件
         end
     end
 
-    %% --- Timer fire and task execution ---
-    TimerCore-->>Task: 🔔 Timer fire / timeout
-    Note over TimerCore,Task: Check timeout<br/>Execute expired tasks
-    Task-->>User: 📤 Final execution result
+    %% --- 定时器触发与任务执行 ---
+    TimerCore-->>Task: 🔔 定时超时/触发
+    Note over TimerCore,Task: 检查超时<br/>执行过期Task
+    Task-->>User: 📤 最终执行反馈
 ```
 
-## 4. API
+## 4. API 说明
 
-Include **`event_loop.h`**.
+包含头文件 `**event_loop.h**`。
 
-| Symbol | Role |
-|--------|------|
-| `EVT_LOOP_PUSH(pfunc, pargs, delay_ms)` | Queue a delayed call; `pfunc` is `void (*)(void *)`. |
-| `EVT_LOOP_REMOVE(pfunc)` | Remove **all** table slots whose function pointer equals `pfunc`. |
-| `EVT_LOOP_REMOVE_WITH_ARGS(pfunc, pargs)` | Remove slots matching `pfunc` and `pargs` (or all `pfunc` if `pargs` matches the macro’s rules — see implementation). |
-| `evt_loop_push_delayed()` / `evt_loop_remove_delayed()` | Underlying C API. |
 
-Initialization is **`INIT_APP_EXPORT(_evt_loop_init)`**; no extra call is required after boot.
+| 符号                                                      | 作用                                   |
+| ------------------------------------------------------- | ------------------------------------ |
+| `EVT_LOOP_PUSH(pfunc, pargs, delay_ms)`                 | 延迟调用；`pfunc` 类型为 `void (*)(void *)`。 |
+| `EVT_LOOP_REMOVE(pfunc)`                                | 删除表中**所有**函数指针为 `pfunc` 的延迟项。        |
+| `EVT_LOOP_REMOVE_WITH_ARGS(pfunc, pargs)`               | 按函数与参数删除指定项。                         |
+| `evt_loop_push_delayed()` / `evt_loop_remove_delayed()` | 上述宏对应的 C API。                        |
 
-## 5. Directory layout
+
+包内使用 `**INIT_APP_EXPORT(_evt_loop_init)`** 自动初始化，应用一般无需再手动调用 init。
+
+## 5. 目录结构
 
 ```
 event_loop/
-├── README.md              # This file
-├── README_zh.md           # Chinese readme
+├── README.md              # 英文说明
+├── README_zh.md           # 中文说明（本文件）
 ├── inc/
-│   └── event_loop.h       # Public API
+│   └── event_loop.h       # 对外 API
 ├── src/
-│   └── event_loop.c       # Implementation
+│   └── event_loop.c       # 实现
 ├── samples/
-│   └── event_loop_test.c  # Optional MSH demo
-├── Kconfig                # PKG_USING_EVENT_LOOP and options
-└── SConscript             # DefineGroup, CPPPATH
+│   └── event_loop_test.c  # 可选 MSH 示例
+└── SConscript             # DefineGroup、CPPPATH
 ```
 
-## 6. Dependencies (Kconfig)
+## 6. 依赖与 Kconfig
 
-Enabling **`PKG_USING_EVENT_LOOP`** selects:
+开启 `**PKG_USING_EVENT_LOOP**` 会选中：
 
 - `RT_USING_MESSAGEQUEUE`
 - `RT_USING_MUTEX`
 - `RT_USING_TIMER_SOFT`
 
-Configurable options:
+主要可配置项：
 
-| Option | Meaning |
-|--------|---------|
-| `EVENT_LOOP_MAX_EVENT_CNT` | Maximum concurrent delayed slots (default 32). |
-| `EVENT_LOOP_MSGQ_DEPTH` | Message queue depth (default 15). |
-| `EVENT_LOOP_THREAD_STACK_SIZE` | `evt_loop` thread stack (default 3072). |
-| `EVENT_LOOP_THREAD_PRIORITY` | Priority (default 12). **Must be strictly greater than `RT_TIMER_THREAD_PRIO`** (numerically larger = lower CPU priority than the soft-timer thread). |
-| `EVENT_LOOP_USING_SAMPLES` | Build the sample (default off in Kconfig). |
 
-## 7. Get started
+| 选项                             | 含义                                                                          |
+| ------------------------------ | --------------------------------------------------------------------------- |
+| `EVENT_LOOP_MAX_EVENT_CNT`     | 延迟表最大槽位数（默认 32）。                                                            |
+| `EVENT_LOOP_MSGQ_DEPTH`        | 消息队列深度（默认 15）。                                                              |
+| `EVENT_LOOP_THREAD_STACK_SIZE` | `evt_loop` 线程栈（默认 3072 字节）。                                                 |
+| `EVENT_LOOP_THREAD_PRIORITY`   | 线程优先级（默认 12）。**必须大于 `RT_TIMER_THREAD_PRIO`**（数值更大表示比软定时器线程**更低**的 CPU 优先级）。 |
+| `EVENT_LOOP_USING_SAMPLES`     | 是否编译示例（Kconfig 默认一般为关，以各 BSP 为准）。                                           |
+
+
+## 7. 快速上手
 
 ### 7.1 menuconfig
+
+## 如何添加该软件包
 
 ```
 RT-Thread online packages
@@ -136,55 +163,55 @@ RT-Thread online packages
             [*] Build event_loop sample (event_loop_test.c)
 ```
 
-1. Open **menuconfig** from your BSP.
-2. Enable **`PKG_USING_EVENT_LOOP`** (*Event loop (delayed dispatch: mq + soft one-shot timer)*).
-3. Adjust stack, priority, table size, and MQ depth as needed.
-4. Optionally enable **`EVENT_LOOP_USING_SAMPLES`** for `evt_loop_test`.
-5. Save and confirm `rtconfig.h` defines `PKG_USING_EVENT_LOOP`.
+1. 在 BSP 工程中打开 **menuconfig**。
+2. 开启 `**PKG_USING_EVENT_LOOP`**（菜单描述含 *Event loop* / *delayed dispatch* 等）。
+3. 按产品调整栈、优先级、表大小、队列深度。
+4. 需要演示时可开启 `**EVENT_LOOP_USING_SAMPLES`**。
+5. 保存配置，确认 `rtconfig.h` 中出现 `PKG_USING_EVENT_LOOP`。
 
-### 7.2 Build
+### 7.2 编译
 
-From the BSP root, run `scons` (or your usual RT-Thread build).
+在 BSP 根目录执行 `scons`（或你常用的 RT-Thread 构建命令）。
 
-### 7.3 Application code
+### 7.3 应用代码示例
 
 ```c
 #include "event_loop.h"
 
 static void my_job(void *arg)
 {
-    /* ... */
+    /* 业务逻辑 */
     EVT_LOOP_REMOVE(my_job);
-    /* optional: EVT_LOOP_PUSH(my_job, arg, delay_ms); */
+    /* 如需链式定时可再次 EVT_LOOP_PUSH(my_job, arg, delay_ms); */
 }
 
-/* from any thread after boot */
+/* 启动后任意线程中 */
 EVT_LOOP_PUSH(my_job, (void *)ctx, 100);
 
-/* from any thread after boot: cancel all pending delayed calls for my_job */
+/* 启动后任意线程中remove */
 EVT_LOOP_REMOVE(my_job);
 
-/* from any thread after boot: cancel delayed call(s) matching this function pointer and args */
+/* 启动后任意线程中remove特定参数 */
 EVT_LOOP_REMOVE_WITH_ARGS(my_job, (void *)1);
 
 ```
 
-### Sample animation (`evt_loop_test`)
+### 示例动图（`evt_loop_test`）
 
-With **`EVENT_LOOP_USING_SAMPLES`** enabled, this is a short capture of running **`evt_loop_test`** from MSH:
+开启 `**EVENT_LOOP_USING_SAMPLES**` 并在 FinSH/MSH 中执行 `**evt_loop_test**` 时的运行示意：
 
-![evt_loop_test sample animation](./doc/test.gif)
+![evt_loop_test 示例动图](./doc/test.gif)
 
-## 8. Notes
+## 8. 使用注意
 
-- **Priority** — If compile fails with the static assert / `#error` on priority, raise `EVENT_LOOP_THREAD_PRIORITY` above `RT_TIMER_THREAD_PRIO` in `rtconfig.h`.
-- **Table full** — If the delay table is exhausted, a warning is logged and the push is dropped; size with `EVENT_LOOP_MAX_EVENT_CNT`.
-- **Same function, multiple slots** — `EVT_LOOP_REMOVE(func)` clears every matching slot; design callbacks so this matches your intent.
+- **优先级** — 若编译报错提示 `event_loop` 优先级必须大于 `RT_TIMER_THREAD_PRIO`，请在 `rtconfig.h` 中把 `EVENT_LOOP_THREAD_PRIORITY` 配得**高于**（数值更大）软定时器线程优先级。
+- **表满** — 延迟表耗尽时会打日志并丢弃本次 push，可通过 `EVENT_LOOP_MAX_EVENT_CNT` 加大容量。
+- **同一函数多槽** — `EVT_LOOP_REMOVE(func)` 会清掉该函数的所有延迟项，设计回调链时请与此语义一致。
 
-## 9. License
+## 9. 许可协议
 
-Apache License 2.0 (SPDX in sources and `package.json`).
+Apache License 2.0（详见各源文件 SPDX 与 `package.json`）。
 
-## 10. Maintainer / repository
+## 10. 维护者与仓库
 
-See **`package.json`** for author, repository URL, and version/site entries.
+作者、仓库地址、版本下载等信息见 `**package.json`**。
